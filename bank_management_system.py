@@ -23,9 +23,7 @@ import logging
 from pathlib import Path
 from collections import Counter, defaultdict
 
-# ==============================================================================
 # GLOBAL CONFIG
-# ==============================================================================
 
 st.set_page_config(
     page_title="Chennai Metropolitan Bank | Transaction Analysis System",
@@ -47,6 +45,7 @@ FILES = {
     "login": BASE_DIR / "login.csv",
     "audit_log": BASE_DIR / "audit_log.csv",
     "activity_log": BASE_DIR / "activity_log.csv",
+    "kyc": BASE_DIR / "kyc.csv",
 }
 
 BRANCHES = ["Chennai", "Coimbatore", "Madurai", "Salem", "Trichy"]
@@ -87,10 +86,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-
-# ==============================================================================
 # UTILITY FUNCTIONS
-# ==============================================================================
 
 def hash_password(password: str) -> str:
     """Securely hash a password using SHA-256."""
@@ -161,10 +157,7 @@ def write_log(log_type: str, message: str, user: str = "SYSTEM"):
         writer.writerow(row)
     logging.info(f"[{log_type.upper()}] {user}: {message}")
 
-
-# ==============================================================================
 # DATABASE LAYER (CSV-BACKED)
-# ==============================================================================
 
 class Database:
     """Handles creation, reading and writing of all CSV-backed tables."""
@@ -198,13 +191,17 @@ class Database:
                        "created_on", "last_login"],
             "audit_log": ["timestamp", "user", "message"],
             "activity_log": ["timestamp", "user", "message"],
+            "kyc": ["customer_id", "full_name", "pan_number", "aadhaar_number",
+                    "occupation", "annual_income", "document_type", "document_number",
+                    "address_proof", "nominee_name", "submitted_on", "status",
+                    "reviewed_by", "reviewed_on", "remarks"],
         }
         for key, cols in schemas.items():
             path = FILES[key]
             if not path.exists() or path.stat().st_size == 0:
                 pd.DataFrame(columns=cols).to_csv(path, index=False)
 
-    # ---- generic helpers -----------------------------------------------
+    # generic helpers 
     def load(self, table: str) -> pd.DataFrame:
         return safe_read_csv(FILES[table])
 
@@ -236,10 +233,7 @@ class Database:
         write_log("audit", f"Restored from backup {latest}")
         return True
 
-
-# ==============================================================================
 # DATA GENERATOR — AUTO MASTER DATA & SAMPLE TRANSACTIONS
-# ==============================================================================
 
 class DataGenerator:
     """Generates realistic Indian banking master + sample transaction data."""
@@ -256,7 +250,7 @@ class DataGenerator:
         self._generate_default_logins()
         write_log("audit", "Auto master data + sample data generated successfully.")
 
-    # ---- branches ---------------------------------------------------
+    #  branches 
     def _generate_branches(self):
         rows = []
         managers = random.sample(FIRST_NAMES_POOL, len(BRANCHES))
@@ -272,7 +266,7 @@ class DataGenerator:
             })
         self.db.save("branches", pd.DataFrame(rows))
 
-    # ---- employees ---------------------------------------------------
+    #  employees 
     def _generate_employees(self):
         designations = ["Branch Manager", "Assistant Manager", "Loan Officer",
                          "Cashier", "Teller", "Customer Relationship Officer",
@@ -295,7 +289,7 @@ class DataGenerator:
                 })
         self.db.save("employees", pd.DataFrame(rows))
 
-    # ---- customers -----------------------------------------------------
+    #  customers 
     def _generate_customers(self):
         rows = []
         categories = ["Regular", "Premium", "Corporate", "Senior Citizen", "Student"]
@@ -321,7 +315,7 @@ class DataGenerator:
                 })
         self.db.save("customers", pd.DataFrame(rows))
 
-    # ---- accounts -----------------------------------------------------
+    #  accounts 
     def _generate_accounts(self):
         customers = self.db.load("customers")
         rows = []
@@ -344,7 +338,7 @@ class DataGenerator:
                 seq += 1
         self.db.save("accounts", pd.DataFrame(rows))
 
-    # ---- transactions ---------------------------------------------------
+    #  transactions 
     def _generate_transactions(self):
         accounts = self.db.load("accounts")
         if accounts.empty:
@@ -426,7 +420,7 @@ class DataGenerator:
             return "Medium"
         return "Low"
 
-    # ---- default logins -----------------------------------------------
+    #  default logins 
     def _generate_default_logins(self):
         rows = [{
             "username": "admin",
@@ -460,10 +454,7 @@ class DataGenerator:
             })
         self.db.save("login", pd.DataFrame(rows))
 
-
-# ==============================================================================
 # AUTH MANAGER
-# ==============================================================================
 
 class AuthManager:
     def __init__(self, db: Database):
@@ -498,10 +489,7 @@ class AuthManager:
         write_log("audit", f"New login registered: {username} ({role})")
         return True, "Registered successfully."
 
-
-# ==============================================================================
 # CUSTOMER MANAGEMENT
-# ==============================================================================
 
 class CustomerManager:
     def __init__(self, db: Database):
@@ -565,10 +553,110 @@ class CustomerManager:
             customers = customers[customers["customer_category"] == category]
         return customers
 
+# KYC MANAGEMENT
 
-# ==============================================================================
+class KYCManager:
+    """
+    Handles manual KYC submission by the customer and manual approval by the
+    Admin/Employee side. A customer's overall KYC status only moves to
+    'Verified' once an authorised staff member reviews and approves the
+    submitted KYC form. Not every customer is pending — only those who have
+    not yet completed / been approved show up in the pending queue.
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def get_kyc(self, customer_id):
+        kyc_df = self.db.load("kyc")
+        if kyc_df.empty:
+            return None
+        row = kyc_df[kyc_df["customer_id"] == customer_id]
+        return row.iloc[0].to_dict() if not row.empty else None
+
+    def submit_kyc(self, customer_id, full_name, pan_number, aadhaar_number,
+                    occupation, annual_income, document_type, document_number,
+                    address_proof, nominee_name):
+        """Customer manually fills and submits their KYC form (status -> Pending)."""
+        kyc_df = self.db.load("kyc")
+        row = {
+            "customer_id": customer_id, "full_name": full_name, "pan_number": pan_number,
+            "aadhaar_number": aadhaar_number, "occupation": occupation,
+            "annual_income": annual_income, "document_type": document_type,
+            "document_number": document_number, "address_proof": address_proof,
+            "nominee_name": nominee_name, "submitted_on": today_str(),
+            "status": "Pending", "reviewed_by": "", "reviewed_on": "", "remarks": "",
+        }
+        if not kyc_df.empty and customer_id in kyc_df["customer_id"].values:
+            kyc_df = kyc_df[kyc_df["customer_id"] != customer_id]  # replace any prior submission
+        kyc_df = pd.concat([kyc_df, pd.DataFrame([row])], ignore_index=True)
+        self.db.save("kyc", kyc_df)
+
+        # Reflect "submission made, awaiting review" on the customer record too
+        customers = self.db.load("customers")
+        idx = customers.index[customers["customer_id"] == customer_id]
+        if len(idx) > 0:
+            customers.loc[idx, "kyc_status"] = "Pending"
+            self.db.save("customers", customers)
+
+        write_log("audit", f"KYC submitted by customer {customer_id}, awaiting admin approval.")
+
+    def pending_queue(self):
+        """Only customers with an actual submitted-and-unreviewed KYC form."""
+        kyc_df = self.db.load("kyc")
+        if kyc_df.empty:
+            return kyc_df
+        return kyc_df[kyc_df["status"] == "Pending"]
+
+    def approve(self, customer_id, reviewer_username, remarks="KYC verified and approved."):
+        kyc_df = self.db.load("kyc")
+        idx = kyc_df.index[kyc_df["customer_id"] == customer_id]
+        if len(idx) == 0:
+            return False, "No KYC submission found for this customer."
+        kyc_df["status"] = kyc_df["status"].astype("object")
+        kyc_df["reviewed_by"] = kyc_df["reviewed_by"].astype("object")
+        kyc_df["reviewed_on"] = kyc_df["reviewed_on"].astype("object")
+        kyc_df["remarks"] = kyc_df["remarks"].astype("object")
+        kyc_df.loc[idx, "status"] = "Approved"
+        kyc_df.loc[idx, "reviewed_by"] = reviewer_username
+        kyc_df.loc[idx, "reviewed_on"] = now_str()
+        kyc_df.loc[idx, "remarks"] = remarks
+        self.db.save("kyc", kyc_df)
+
+        customers = self.db.load("customers")
+        cidx = customers.index[customers["customer_id"] == customer_id]
+        if len(cidx) > 0:
+            customers.loc[cidx, "kyc_status"] = "Verified"
+            self.db.save("customers", customers)
+
+        write_log("audit", f"KYC approved for {customer_id} by {reviewer_username}", user=reviewer_username)
+        return True, "KYC approved successfully."
+
+    def reject(self, customer_id, reviewer_username, remarks="KYC documents insufficient / incorrect."):
+        kyc_df = self.db.load("kyc")
+        idx = kyc_df.index[kyc_df["customer_id"] == customer_id]
+        if len(idx) == 0:
+            return False, "No KYC submission found for this customer."
+        kyc_df["status"] = kyc_df["status"].astype("object")
+        kyc_df["reviewed_by"] = kyc_df["reviewed_by"].astype("object")
+        kyc_df["reviewed_on"] = kyc_df["reviewed_on"].astype("object")
+        kyc_df["remarks"] = kyc_df["remarks"].astype("object")
+        kyc_df.loc[idx, "status"] = "Rejected"
+        kyc_df.loc[idx, "reviewed_by"] = reviewer_username
+        kyc_df.loc[idx, "reviewed_on"] = now_str()
+        kyc_df.loc[idx, "remarks"] = remarks
+        self.db.save("kyc", kyc_df)
+
+        customers = self.db.load("customers")
+        cidx = customers.index[customers["customer_id"] == customer_id]
+        if len(cidx) > 0:
+            customers.loc[cidx, "kyc_status"] = "Pending"
+            self.db.save("customers", customers)
+
+        write_log("audit", f"KYC rejected for {customer_id} by {reviewer_username}", user=reviewer_username)
+        return True, "KYC rejected. Customer must resubmit."
+
 # ACCOUNT MANAGEMENT
-# ==============================================================================
 
 class AccountManager:
     def __init__(self, db: Database):
@@ -613,10 +701,7 @@ class AccountManager:
         rate = INTEREST_RATES.get(acc["account_type"], 0.0)
         return round(float(acc["balance"]) * rate / 100, 2)
 
-
-# ==============================================================================
 # TRANSACTION MANAGEMENT
-# ==============================================================================
 
 class TransactionManager:
     def __init__(self, db: Database, account_mgr: AccountManager):
@@ -694,10 +779,7 @@ class TransactionManager:
             txns = txns[txns["status"] == status]
         return txns.sort_values("datetime", ascending=False)
 
-
-# ==============================================================================
 # FRAUD DETECTION ENGINE
-# ==============================================================================
 
 class FraudDetectionEngine:
     """Rule based fraud / risk scoring engine."""
@@ -806,10 +888,7 @@ class FraudDetectionEngine:
                          "txn_type", "amount", "datetime", "risk_score", "risk_level",
                          "fraud_reasons"]]
 
-
-# ==============================================================================
 # REPORT ENGINE
-# ==============================================================================
 
 class ReportEngine:
     def __init__(self, db: Database):
@@ -918,10 +997,7 @@ class ReportEngine:
     def employee_report(self):
         return self.db.load("employees")
 
-
-# ==============================================================================
 # CHART ENGINE
-# ==============================================================================
 
 class ChartEngine:
     """Generates professional Plotly charts for the dashboard."""
@@ -1023,10 +1099,7 @@ class ChartEngine:
                      color_discrete_sequence=ChartEngine.COLORWAY)
         return fig
 
-
-# ==============================================================================
 # STREAMLIT UI — STYLING
-# ==============================================================================
 
 CUSTOM_CSS = """
 <style>
@@ -1101,10 +1174,7 @@ def status_badge(status):
     cls = {"Active": "badge-active", "Inactive": "badge-inactive", "Blocked": "badge-blocked"}.get(status, "badge-inactive")
     return f'<span class="{cls}">{status}</span>'
 
-
-# ==============================================================================
 # STREAMLIT APPLICATION
-# ==============================================================================
 
 class BankingApp:
     def __init__(self):
@@ -1115,6 +1185,7 @@ class BankingApp:
 
         self.auth = AuthManager(self.db)
         self.cust_mgr = CustomerManager(self.db)
+        self.kyc_mgr = KYCManager(self.db)
         self.acc_mgr = AccountManager(self.db)
         self.txn_mgr = TransactionManager(self.db, self.acc_mgr)
         self.fraud_engine = FraudDetectionEngine(self.db)
@@ -1129,14 +1200,14 @@ class BankingApp:
             if k not in st.session_state:
                 st.session_state[k] = v
 
-    # ---------------------------------------------------------------- run
+    #  run
     def run(self):
         if not st.session_state.logged_in:
             self._login_page()
         else:
             self._main_app()
 
-    # ---------------------------------------------------------------- login
+    # login
     def _login_page(self):
         st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
         st.markdown("""
@@ -1175,7 +1246,7 @@ class BankingApp:
             st.markdown('</div>', unsafe_allow_html=True)
         render_footer()
 
-    # ---------------------------------------------------------------- main
+    # main
     def _main_app(self):
         user = st.session_state.user
         st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -1188,10 +1259,10 @@ class BankingApp:
 
             menu_options = ["Dashboard"]
             if user["role"] in ("Admin", "Employee"):
-                menu_options += ["Customer Management", "Account Management", "Transactions",
+                menu_options += ["Customer Management", "KYC Approval", "Account Management", "Transactions",
                                   "Fraud Detection", "Reports", "Backup & Logs"]
             else:
-                menu_options += ["My Accounts", "My Transactions", "My Activity Report"]
+                menu_options += ["My Accounts", "My Transactions", "KYC Verification", "My Activity Report"]
 
             choice = st.radio("📋 Navigation", menu_options, label_visibility="collapsed")
             st.session_state.menu = choice
@@ -1210,6 +1281,8 @@ class BankingApp:
             self._page_dashboard()
         elif menu == "Customer Management":
             self._page_customer_management()
+        elif menu == "KYC Approval":
+            self._page_kyc_approval()
         elif menu == "Account Management":
             self._page_account_management()
         elif menu == "Transactions":
@@ -1224,12 +1297,14 @@ class BankingApp:
             self._page_my_accounts()
         elif menu == "My Transactions":
             self._page_my_transactions()
+        elif menu == "KYC Verification":
+            self._page_my_kyc()
         elif menu == "My Activity Report":
             self._page_my_activity_report()
 
         render_footer()
 
-    # ============================================================ DASHBOARD
+    #  DASHBOARD
     def _page_dashboard(self):
         customers = self.db.load("customers")
         employees = self.db.load("employees")
@@ -1271,7 +1346,7 @@ class BankingApp:
         col6.plotly_chart(ChartEngine.customer_activity_analysis(txns), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ============================================================ CUSTOMERS
+    # CUSTOMERS
     def _page_customer_management(self):
         st.subheader("👥 Customer Management")
         tabs = st.tabs(["➕ Add Customer", "🔍 Search / View", "✏️ Update", "🗑️ Delete", "📋 All Customers"])
@@ -1353,7 +1428,62 @@ class BankingApp:
             st.download_button("⬇️ Download All Customers (CSV)", self.db.load("customers").to_csv(index=False),
                                 "customers_export.csv", "text/csv")
 
-    # ============================================================ ACCOUNTS
+    # KYC APPROVAL (ADMIN/EMPLOYEE)
+    def _page_kyc_approval(self):
+        st.subheader("🪪 KYC Verification & Approval")
+        st.caption("Only customers who have manually submitted a KYC form and are awaiting review appear in the pending queue below. Not every customer is required to be pending.")
+
+        pending = self.kyc_mgr.pending_queue()
+        c1, c2, c3 = st.columns(3)
+        customers = self.db.load("customers")
+        kyc_all = self.db.load("kyc")
+        c1.metric("Pending Review", len(pending))
+        c2.metric("Verified Customers", len(customers[customers["kyc_status"] == "Verified"]))
+        c3.metric("Total KYC Submissions", len(kyc_all))
+
+        tabs = st.tabs(["🕓 Pending Approvals", "📜 All KYC Records"])
+
+        with tabs[0]:
+            if pending.empty:
+                st.success("No pending KYC submissions right now.")
+            else:
+                sel = st.selectbox("Select a Pending Submission (by Customer ID)", pending["customer_id"].tolist())
+                if sel:
+                    kyc_row = self.kyc_mgr.get_kyc(sel)
+                    cust = self.cust_mgr.get_customer(sel)
+                    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                    st.markdown(f"#### Reviewing KYC — {cust['name'] if cust else ''} (`{sel}`)")
+                    colA, colB = st.columns(2)
+                    colA.write(f"**Full Name (as per KYC):** {kyc_row['full_name']}")
+                    colB.write(f"**PAN Number:** {kyc_row['pan_number']}")
+                    colA.write(f"**Aadhaar Number:** {kyc_row['aadhaar_number']}")
+                    colB.write(f"**Occupation:** {kyc_row['occupation']}")
+                    colA.write(f"**Annual Income:** {fmt_currency(kyc_row['annual_income'])}")
+                    colB.write(f"**Document Type:** {kyc_row['document_type']}")
+                    colA.write(f"**Document Number:** {kyc_row['document_number']}")
+                    colB.write(f"**Nominee Name:** {kyc_row['nominee_name']}")
+                    st.write(f"**Address Proof:** {kyc_row['address_proof']}")
+                    st.write(f"**Submitted On:** {kyc_row['submitted_on']}")
+
+                    remarks = st.text_area("Reviewer Remarks", value="KYC verified and approved.")
+                    colX, colY = st.columns(2)
+                    if colX.button("✅ Approve KYC", use_container_width=True, type="primary"):
+                        ok, msg = self.kyc_mgr.approve(sel, st.session_state.user["username"], remarks)
+                        st.success(msg) if ok else st.error(msg)
+                        st.rerun()
+                    if colY.button("❌ Reject KYC", use_container_width=True):
+                        ok, msg = self.kyc_mgr.reject(sel, st.session_state.user["username"], remarks or "Documents insufficient / incorrect.")
+                        st.warning(msg) if ok else st.error(msg)
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+        with tabs[1]:
+            st.dataframe(kyc_all, use_container_width=True, height=400)
+            if not kyc_all.empty:
+                st.download_button("⬇️ Download KYC Records (CSV)", kyc_all.to_csv(index=False),
+                                    "kyc_records.csv", "text/csv")
+
+    #  ACCOUNTS
     def _page_account_management(self):
         st.subheader("💳 Account Management")
         tabs = st.tabs(["➕ Open Account", "💰 Deposit / Withdraw", "🔁 Fund Transfer",
@@ -1426,7 +1556,7 @@ class BankingApp:
                          color_discrete_sequence=ChartEngine.COLORWAY)
             st.plotly_chart(fig, use_container_width=True)
 
-    # ============================================================ TRANSACTIONS
+    #  TRANSACTIONS
     def _page_transactions(self):
         st.subheader("💸 Transaction Management")
         st.markdown("#### 🔎 Filter Transaction History")
@@ -1453,7 +1583,7 @@ class BankingApp:
             st.download_button("⬇️ Download Filtered Transactions (CSV)", results.to_csv(index=False),
                                 "transactions_export.csv", "text/csv")
 
-    # ============================================================ FRAUD DETECTION
+    # FRAUD DETECTION
     def _page_fraud_detection(self):
         st.subheader("🚨 Fraud Detection & Risk Analysis")
         with st.spinner("Running fraud detection engine across all transactions..."):
@@ -1476,7 +1606,7 @@ class BankingApp:
             st.download_button("⬇️ Download Suspicious Report (CSV)", flagged.to_csv(index=False),
                                 "suspicious_transactions.csv", "text/csv")
 
-    # ============================================================ REPORTS
+    # REPORTS
     def _page_reports(self):
         st.subheader("📑 Reports Center")
         tabs = st.tabs(["Customer Activity Report", "Monthly Transaction Report",
@@ -1561,7 +1691,7 @@ class BankingApp:
         st.info(report["recommendation"])
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ============================================================ BACKUP & LOGS
+    # BACKUP & LOGS
     def _page_backup_logs(self):
         st.subheader("🗄️ Backup, Restore & Logs")
         col1, col2 = st.columns(2)
@@ -1591,7 +1721,7 @@ class BankingApp:
         st.markdown("#### 🕓 Activity Log")
         st.dataframe(self.db.load("activity_log").sort_values("timestamp", ascending=False), use_container_width=True, height=300)
 
-    # ============================================================ CUSTOMER SELF-SERVICE
+    # CUSTOMER SELF-SERVICE
     def _page_my_accounts(self):
         cust_id = st.session_state.user["linked_id"]
         cust = self.cust_mgr.get_customer(cust_id)
@@ -1615,15 +1745,79 @@ class BankingApp:
             st.download_button("⬇️ Download My Statement (CSV)", results.to_csv(index=False),
                                 "my_statement.csv", "text/csv")
 
+    def _page_my_kyc(self):
+        cust_id = st.session_state.user["linked_id"]
+        cust = self.cust_mgr.get_customer(cust_id)
+        st.subheader("🪪 KYC Verification")
+
+        current_status = cust["kyc_status"] if cust else "Pending"
+        st.markdown(f"**Current KYC Status:** {status_badge('Active' if current_status == 'Verified' else 'Inactive')}", unsafe_allow_html=True)
+
+        existing = self.kyc_mgr.get_kyc(cust_id)
+
+        if current_status == "Verified" and existing is not None and existing.get("status") == "Approved":
+            st.success("✅ Your KYC has been reviewed and approved by the bank. No further action is needed.")
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown("#### Approved KYC Details")
+            colA, colB = st.columns(2)
+            colA.write(f"**Full Name:** {existing['full_name']}")
+            colB.write(f"**PAN Number:** {existing['pan_number']}")
+            colA.write(f"**Aadhaar Number:** {existing['aadhaar_number']}")
+            colB.write(f"**Document Type:** {existing['document_type']}")
+            colA.write(f"**Approved By:** {existing['reviewed_by']}")
+            colB.write(f"**Approved On:** {existing['reviewed_on']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            return
+
+        if existing is not None and existing.get("status") == "Pending":
+            st.info("📨 Your KYC form has been submitted and is awaiting review by bank staff. You'll be notified once it's approved.")
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown("#### Your Submitted Details")
+            colA, colB = st.columns(2)
+            colA.write(f"**Full Name:** {existing['full_name']}")
+            colB.write(f"**PAN Number:** {existing['pan_number']}")
+            colA.write(f"**Document Type:** {existing['document_type']}")
+            colB.write(f"**Submitted On:** {existing['submitted_on']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            return
+
+        if existing is not None and existing.get("status") == "Rejected":
+            st.error(f"❌ Your previous KYC submission was rejected. Reason: {existing.get('remarks', '')}. Please resubmit below.")
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown("#### 📝 Fill KYC Details")
+        with st.form("kyc_submit_form"):
+            col1, col2 = st.columns(2)
+            full_name = col1.text_input("Full Name (as per ID proof)", value=cust["name"] if cust else "")
+            pan_number = col2.text_input("PAN Number", placeholder="ABCDE1234F")
+            aadhaar_number = col1.text_input("Aadhaar Number", placeholder="XXXX-XXXX-XXXX")
+            occupation = col2.selectbox("Occupation", ["Salaried", "Self-Employed", "Business Owner",
+                                                         "Student", "Homemaker", "Retired", "Other"])
+            annual_income = col1.number_input("Annual Income (₹)", min_value=0.0, step=10000.0)
+            document_type = col2.selectbox("ID Document Type", ["Aadhaar Card", "Passport", "Voter ID",
+                                                                  "Driving License", "PAN Card"])
+            document_number = col1.text_input("Document Number")
+            nominee_name = col2.text_input("Nominee Name")
+            address_proof = st.text_area("Address Proof Details", value=cust["address"] if cust else "")
+
+            submitted = st.form_submit_button("📤 Submit KYC for Approval", use_container_width=True)
+            if submitted:
+                if not full_name or not pan_number or not aadhaar_number or not document_number:
+                    st.error("Please fill in all mandatory fields: Full Name, PAN, Aadhaar, Document Number.")
+                else:
+                    self.kyc_mgr.submit_kyc(cust_id, full_name, pan_number, aadhaar_number, occupation,
+                                             annual_income, document_type, document_number,
+                                             address_proof, nominee_name)
+                    st.success("Your KYC has been submitted successfully and is now pending admin approval.")
+                    st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
     def _page_my_activity_report(self):
         cust_id = st.session_state.user["linked_id"]
         st.subheader("📋 My Activity Report")
         self._render_customer_activity_report(cust_id)
 
-
-# ==============================================================================
 # ENTRY POINT
-# ==============================================================================
 
 def main():
     app = BankingApp()
