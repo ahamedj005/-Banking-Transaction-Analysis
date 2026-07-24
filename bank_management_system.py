@@ -2,6 +2,7 @@
  BANKING TRANSACTION ANALYSIS SYSTEM
  Head Office: Chennai | Branches: Chennai, Coimbatore, Madurai, Salem, Trichy
 """
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -477,6 +478,7 @@ class AuthManager:
             return None
         row = match.iloc[0]
         if verify_password(password, row["password_hash"]):
+            login_df["last_login"] = login_df["last_login"].astype("object")
             login_df.loc[login_df["username"] == row["username"], "last_login"] = now_str()
             self.db.save("login", login_df)
             write_log("audit", f"Login success for {username}", user=username)
