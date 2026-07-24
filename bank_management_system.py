@@ -7,6 +7,7 @@ Default admin login -> username: admin | password: admin123
 import os
 import csv
 import json
+import random
 import hashlib
 import secrets
 import statistics
@@ -53,6 +54,29 @@ SCHEMAS = {
 
 DEFAULT_COUNTERS = {"customer_id": 1000, "account_number": 100000000,
                      "transaction_id": 1, "alert_id": 1}
+
+# ----------------------------------------------------------------------------
+# SEED DATA CONFIG
+# ----------------------------------------------------------------------------
+BRANCHES = ["Chennai", "Coimbatore", "Madurai", "Tiruppur", "Salem"]
+CUSTOMERS_PER_BRANCH = 85
+EMPLOYEES_PER_BRANCH = 10
+
+FIRST_NAMES = [
+    "Arun", "Bala", "Chitra", "Dinesh", "Elango", "Farida", "Gopal", "Hema",
+    "Indira", "Jayaram", "Kavitha", "Lakshmi", "Mani", "Nandhini", "Oviya",
+    "Prakash", "Rani", "Senthil", "Tamil", "Uma", "Vijay", "Yazhini",
+    "Kumar", "Meena", "Suresh", "Priya", "Ravi", "Divya", "Karthik", "Anitha",
+    "Selvam", "Revathi", "Murugan", "Sangeetha", "Vignesh", "Deepa", "Ramesh",
+    "Saranya", "Vasanth", "Nithya", "Manoj", "Swathi", "Ganesh", "Preethi",
+]
+LAST_NAMES = [
+    "Kumar", "Raj", "Subramaniam", "Pillai", "Nair", "Chettiar", "Iyer",
+    "Gounder", "Mudaliar", "Reddy", "Rao", "Naidu", "Krishnan", "Perumal",
+    "Shanmugam", "Velu", "Balan", "Doss", "Rajan", "Moorthy",
+]
+
+random.seed(42)  # deterministic seed data across runs
 
 
 def init_database():
@@ -164,6 +188,106 @@ def bootstrap_admin():
         log_audit("SYSTEM", "CREATE", "user", "admin", "Default admin bootstrapped")
 
 
+# ----------------------------------------------------------------------------
+# SAMPLE DATA SEEDING
+# ----------------------------------------------------------------------------
+
+def _random_phone():
+    return "9" + "".join(str(random.randint(0, 9)) for _ in range(9))
+
+
+def _random_dob():
+    start = datetime(1955, 1, 1)
+    end = datetime(2005, 12, 31)
+    delta_days = (end - start).days
+    return (start + timedelta(days=random.randint(0, delta_days))).strftime("%Y-%m-%d")
+
+
+def _slugify(name):
+    return name.lower().replace(" ", ".").replace("'", "")
+
+
+def seed_sample_data():
+    """Populate 85 customers + 10 employees per branch, each customer gets one
+    seeded SAVINGS account. Idempotent: skips entirely if customers.csv already
+    has data, so re-running the app never duplicates rows."""
+    existing_customers = read_csv(CUSTOMERS_FILE)
+    if existing_customers:
+        return  # already seeded (or real data already exists) - do nothing
+
+    new_customers = []
+    new_accounts = []
+    new_users = []
+    used_emails = set()
+    used_usernames = set()
+
+    for branch in BRANCHES:
+        branch_slug = branch.lower()
+
+        # ---- customers ----
+        for _ in range(CUSTOMERS_PER_BRANCH):
+            first = random.choice(FIRST_NAMES)
+            last = random.choice(LAST_NAMES)
+            full_name = f"{first} {last}"
+            customer_id = next_id("customer_id")
+
+            email_base = f"{_slugify(full_name)}"
+            email = f"{email_base}@example.com"
+            suffix = 1
+            while email in used_emails:
+                suffix += 1
+                email = f"{email_base}{suffix}@example.com"
+            used_emails.add(email)
+
+            gender = random.choice(["M", "F"])
+            created = now_str()
+            customer_row = {
+                "customer_id": customer_id, "name": full_name, "dob": _random_dob(),
+                "gender": gender, "phone": _random_phone(), "email": email,
+                "address": f"{random.randint(1, 200)}, {branch} Main Road, Tamil Nadu",
+                "branch": branch, "created_at": created, "updated_at": created,
+                "status": "ACTIVE",
+            }
+            new_customers.append(customer_row)
+
+            account_number = next_id("account_number")
+            opening_balance = round(random.uniform(500, 150000), 2)
+            account_row = {
+                "account_number": account_number, "customer_id": customer_id,
+                "account_type": random.choice(["SAVINGS", "SAVINGS", "SAVINGS", "CURRENT"]),
+                "branch": branch, "balance": f"{opening_balance:.2f}",
+                "created_at": created, "status": "ACTIVE",
+            }
+            new_accounts.append(account_row)
+
+        # ---- employees (bank staff logins for this branch) ----
+        for i in range(1, EMPLOYEES_PER_BRANCH + 1):
+            username = f"{branch_slug}.emp{i}"
+            counter = 1
+            base_username = username
+            while username in used_usernames:
+                counter += 1
+                username = f"{base_username}{counter}"
+            used_usernames.add(username)
+
+            salt, pwd_hash = hash_password("employee123")
+            new_users.append({
+                "username": username, "salt": salt, "password_hash": pwd_hash,
+                "role": "employee", "linked_customer_id": "", "created_at": now_str(),
+            })
+
+    write_csv(CUSTOMERS_FILE, new_customers, SCHEMAS[CUSTOMERS_FILE])
+    write_csv(ACCOUNTS_FILE, new_accounts, SCHEMAS[ACCOUNTS_FILE])
+
+    # append employees onto whatever users already exist (keep admin row)
+    existing_users = read_csv(USERS_FILE)
+    write_csv(USERS_FILE, existing_users + new_users, SCHEMAS[USERS_FILE])
+
+    log_audit("SYSTEM", "SEED", "database", "bulk",
+              f"Seeded {len(new_customers)} customers, {len(new_accounts)} accounts, "
+              f"{len(new_users)} employee logins across {len(BRANCHES)} branches")
+
+
 def find_customer(customer_id):
     for c in read_csv(CUSTOMERS_FILE):
         if c["customer_id"] == customer_id:
@@ -257,6 +381,7 @@ def df(rows):
 st.set_page_config(page_title="Bank Management System", layout="wide")
 init_database()
 bootstrap_admin()
+seed_sample_data()
 
 if "session" not in st.session_state:
     st.session_state.session = None
@@ -285,6 +410,11 @@ def do_login(username, password):
 if st.session_state.session is None:
     st.title("🏦 Bank Management System - Login")
     st.info("Default admin login → username: **admin** | password: **admin123**")
+    st.caption(
+        "Sample data pre-loaded: 85 customers + 10 employee logins per branch "
+        f"({', '.join(BRANCHES)}). Employee logins look like `chennai.emp1` / "
+        "password `employee123`."
+    )
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -325,7 +455,7 @@ if menu == "Customer Management":
             phone = st.text_input("Phone (10 digits)")
             email = st.text_input("Email")
             address = st.text_area("Address")
-            branch = st.text_input("Branch")
+            branch = st.selectbox("Branch", BRANCHES)
             submitted = st.form_submit_button("Add Customer")
             if submitted:
                 if not valid_phone(phone):
@@ -414,6 +544,9 @@ if menu == "Customer Management":
 
     with tab5:
         customers = read_csv(CUSTOMERS_FILE)
+        branch_filter = st.selectbox("Filter by branch", ["All"] + BRANCHES, key="view_all_branch")
+        if branch_filter != "All":
+            customers = [c for c in customers if c["branch"] == branch_filter]
         st.dataframe(df(customers), use_container_width=True)
         log_activity(session["username"], session["role"], "Viewed all customers")
 
